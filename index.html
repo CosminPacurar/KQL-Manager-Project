@@ -359,7 +359,9 @@
   <div class="topbar-stats" id="statsLabel" style="display:flex;align-items:center;gap:8px;">
     <span id="saveDot" style="width:7px;height:7px;border-radius:50%;background:#8b92a8;display:inline-block;transition:background .3s;flex-shrink:0;" title="Conectare la cloud..."></span>
     <span id="statsText">Se încarcă…</span>
+    <span id="userBadge" style="display:none;align-items:center;gap:6px;margin-left:10px;font-size:11px;color:var(--text2);"></span>
   </div>
+  <button onclick="openHistory()" style="height:30px;padding:0 11px;border-radius:8px;border:0.5px solid rgba(255,255,255,0.14);background:transparent;color:#8b92a8;font-family:var(--font-sans);font-size:12px;cursor:pointer;" title="Istoric modificări (cine a adăugat/șters)">�途 Istoric</button>
   <button onclick="exportData()" style="height:30px;padding:0 11px;border-radius:8px;border:0.5px solid rgba(255,255,255,0.14);background:transparent;color:#8b92a8;font-family:var(--font-sans);font-size:12px;cursor:pointer;" title="Descarcă un backup JSON cu toate query-urile">⬇ Backup JSON</button>
   <button onclick="refreshFromCloud()" style="height:30px;padding:0 13px;border-radius:8px;border:0.5px solid #3b82f6;background:rgba(59,130,246,0.12);color:#60a5fa;font-family:var(--font-sans);font-size:12px;font-weight:600;cursor:pointer;" title="Reîncarcă din cloud (vezi modificările echipei)">⟳ Reîmprospătează</button>
 </div>
@@ -430,12 +432,46 @@
   </div>
 </div>
 
+
+<!-- LOGIN GATE (covers everything until authenticated) -->
+<div id="authGate" style="position:fixed;inset:0;z-index:9999;background:var(--bg,#0d0f14);display:flex;align-items:center;justify-content:center;">
+  <div style="width:340px;max-width:90vw;background:var(--bg2);border:0.5px solid var(--border);border-radius:14px;padding:28px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+    <div style="display:flex;align-items:center;gap:9px;font-size:17px;font-weight:600;color:var(--text);margin-bottom:4px;">
+      <span style="font-size:22px;">🛡</span> KQL Query Manager
+    </div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:20px;">Autentificare necesară</div>
+    <div class="form-row">
+      <label class="form-label">Email</label>
+      <input class="form-input" id="authEmail" type="email" autocomplete="username" placeholder="nume@companie.com">
+    </div>
+    <div class="form-row">
+      <label class="form-label">Parolă</label>
+      <input class="form-input" id="authPass" type="password" autocomplete="current-password" placeholder="••••••••">
+    </div>
+    <div id="authError" style="display:none;font-size:12px;color:#f87171;margin:4px 0 10px;"></div>
+    <button class="btn btn-primary" id="authBtn" style="width:100%;justify-content:center;margin-top:8px;" onclick="doLogin()">Autentificare</button>
+    <div style="font-size:11px;color:var(--text3);margin-top:14px;line-height:1.5;">Contul tău este creat de administrator. Dacă nu poți intra, cere-i să te adauge în Supabase.</div>
+  </div>
+</div>
+
+<!-- HISTORY / AUDIT LOG modal -->
+<div class="modal-overlay" id="historyOverlay">
+  <div class="modal" style="width:560px;max-width:94vw;">
+    <h3>🕘 Istoric modificări</h3>
+    <div id="historyList" style="max-height:50vh;overflow:auto;font-size:12px;color:var(--text2);"></div>
+    <div class="modal-btns" style="margin-top:14px;">
+      <button class="btn btn-ghost" onclick="closeHistory()">Închide</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 // ════════════════════════════════════════════════════════════════════
 //  CONFIG — ÎNLOCUIEȘTE cele două valori de mai jos cu ale tale.
 //  Le găsești în Supabase → Project Settings → API
+//  (Model: autentificare obligatorie pentru a vedea și edita.)
 //   • Project URL   →  SUPABASE_URL
 //   • anon public key → SUPABASE_ANON_KEY
 // ════════════════════════════════════════════════════════════════════
@@ -444,6 +480,115 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // ════════════════════════════════════════════════════════════════════
 
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+let currentUser = null;   // set after login
+
+// ─── AUTH ────────────────────────────────────────────────────────────
+async function initAuth() {
+  if (SUPABASE_URL.startsWith('PUNE_AICI')) {
+    showAuthError('Config Supabase lipsă — completează URL și cheia în cod.');
+    return;
+  }
+  const { data } = await sb.auth.getSession();
+  if (data && data.session) {
+    onLoggedIn(data.session.user);
+  }
+  // react to future auth changes (e.g. token refresh, logout)
+  sb.auth.onAuthStateChange((_event, session) => {
+    if (session && session.user) onLoggedIn(session.user);
+    else onLoggedOut();
+  });
+}
+
+function showAuthError(msg) {
+  const el = document.getElementById('authError');
+  el.textContent = msg; el.style.display = 'block';
+}
+
+async function doLogin() {
+  const email = document.getElementById('authEmail').value.trim();
+  const pass  = document.getElementById('authPass').value;
+  if (!email || !pass) { showAuthError('Completează email și parolă.'); return; }
+  const btn = document.getElementById('authBtn');
+  btn.disabled = true; btn.textContent = 'Se conectează…';
+  document.getElementById('authError').style.display = 'none';
+  const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+  btn.disabled = false; btn.textContent = 'Autentificare';
+  if (error) { showAuthError('Autentificare eșuată: ' + error.message); return; }
+  onLoggedIn(data.user);
+}
+
+async function logout() {
+  await sb.auth.signOut();
+  onLoggedOut();
+}
+
+function onLoggedIn(user) {
+  currentUser = user;
+  document.getElementById('authGate').style.display = 'none';
+  // show user badge + logout
+  const badge = document.getElementById('userBadge');
+  if (badge) {
+    badge.style.display = 'flex';
+    badge.innerHTML = `<span title="Autentificat">👤 ${escHtml(user.email||'')}</span>
+      <button onclick="logout()" style="background:transparent;border:0.5px solid var(--border);color:var(--text3);border-radius:6px;font-size:10px;padding:2px 7px;cursor:pointer;font-family:var(--font-sans);">Ieșire</button>`;
+  }
+  loadFromCloud();
+}
+
+function onLoggedOut() {
+  currentUser = null;
+  const gate = document.getElementById('authGate');
+  if (gate) gate.style.display = 'flex';
+  const badge = document.getElementById('userBadge');
+  if (badge) { badge.style.display = 'none'; badge.innerHTML = ''; }
+}
+
+// ─── AUDIT LOG ───────────────────────────────────────────────────────
+async function logEvent(action, targetId, targetTitle) {
+  try {
+    await sb.from('audit_log').insert({
+      user_email: currentUser ? currentUser.email : 'necunoscut',
+      action, target_id: targetId || null, target_title: targetTitle || null
+    });
+  } catch (e) { console.warn('audit log failed', e); }
+}
+
+function actionLabel(a) {
+  return ({
+    add:'a adăugat', edit:'a editat', delete:'a șters',
+    add_category:'a adăugat categoria', delete_category:'a șters categoria'
+  })[a] || a;
+}
+function actionColor(a) {
+  if (a==='delete'||a==='delete_category') return '#f87171';
+  if (a==='add'||a==='add_category') return '#4ade80';
+  return '#facc15';
+}
+
+async function openHistory() {
+  document.getElementById('historyOverlay').classList.add('open');
+  const list = document.getElementById('historyList');
+  list.innerHTML = '<div style="padding:14px 2px;color:var(--text3);">Se încarcă…</div>';
+  const { data, error } = await sb.from('audit_log').select('*').order('ts', { ascending:false }).limit(200);
+  if (error) { list.innerHTML = '<div style="padding:14px 2px;color:#f87171;">Eroare: '+escHtml(error.message)+'</div>'; return; }
+  if (!data || !data.length) { list.innerHTML = '<div style="padding:14px 2px;color:var(--text3);">Niciun eveniment încă.</div>'; return; }
+  list.innerHTML = data.map(ev => {
+    const d = new Date(ev.ts);
+    const when = d.toLocaleString('ro-RO', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
+    return `<div style="display:flex;gap:10px;align-items:baseline;padding:8px 4px;border-bottom:0.5px solid var(--border);">
+      <span style="width:7px;height:7px;border-radius:50%;background:${actionColor(ev.action)};flex-shrink:0;margin-top:5px;"></span>
+      <div style="flex:1;min-width:0;">
+        <span style="color:var(--text);">${escHtml(ev.user_email||'necunoscut')}</span>
+        <span style="color:var(--text3);"> ${actionLabel(ev.action)} </span>
+        <span style="color:var(--text2);">${escHtml(ev.target_title||ev.target_id||'')}</span>
+      </div>
+      <span style="color:var(--text3);font-size:11px;flex-shrink:0;">${when}</span>
+    </div>`;
+  }).join('');
+}
+function closeHistory() { document.getElementById('historyOverlay').classList.remove('open'); }
+
 
 let queries = [];
 let categories = [];      // custom categories from cloud
@@ -692,15 +837,18 @@ async function duplicateQuery(id) {
   if (error) { setStatus('error','Eroare'); showToast('⚠ '+error.message); return; }
   queries.unshift({ id:newRow.id, title:newRow.title, cat:newRow.cat, desc:newRow.descr, query:newRow.query });
   setStatus('ok','Salvat'); render(); selectQuery(newRow.id);
+  logEvent('add', newRow.id, newRow.title);
   showToast('Query duplicat!');
 }
 
 async function deleteQuery(id) {
   if (!confirm('Ștergi acest query? Va dispărea pentru toată echipa.')) return;
+  const _delTitle = (queries.find(x=>x.id===id)||{}).title || id;
   setStatus('busy','Se șterge…');
   const { error } = await sb.from('queries').delete().eq('id', id);
   if (error) { setStatus('error','Eroare'); showToast('⚠ '+error.message); return; }
   queries = queries.filter(x => x.id !== id);
+  logEvent('delete', id, _delTitle);
   selectedId = null;
   document.getElementById('detail').innerHTML = `<div class="empty"><div class="empty-icon">⬚</div><div class="empty-text">Selectează un query din lista din stânga</div></div>`;
   setStatus('ok','Șters'); render();
@@ -758,12 +906,14 @@ async function saveQuery() {
       if (error) throw error;
       const idx = queries.findIndex(x => x.id === editingId);
       if (idx > -1) queries[idx] = { ...queries[idx], title, cat, desc, query };
+      logEvent('edit', editingId, title);
     } else {
       const newRow = { id:'q'+Date.now(), title, cat, descr:desc, query };
       const { error } = await sb.from('queries').insert(newRow);
       if (error) throw error;
       queries.unshift({ id:newRow.id, title, cat, desc, query });
       editingId = newRow.id;
+      logEvent('add', newRow.id, title);
     }
     setStatus('ok','Salvat în cloud');
     closeModal(); render();
@@ -826,12 +976,14 @@ async function addCategory() {
   const { error } = await sb.from('categories').insert({ id, label:name, color:hex, bg });
   if (error) { setStatus('error','Eroare'); showToast('⚠ '+error.message); return; }
   categories.push({ id, label:name, color:hex, bg });
+  logEvent('add_category', id, name);
   setStatus('ok','Salvat'); renderFilters(); renderCatList();
   document.getElementById('newCatName').value = '';
   showToast('Categorie "' + name + '" adăugată!');
 }
 
 async function deleteCategory(id) {
+  const _catLabel = (categories.find(c=>c.id===id)||{}).label || id;
   const inUse = queries.filter(q => q.cat === id).length;
   if (inUse > 0) {
     if (!confirm(`Această categorie are ${inUse} query-uri. Acestea vor fi mutate la "Other". Continui?`)) return;
@@ -846,6 +998,7 @@ async function deleteCategory(id) {
     const { error } = await sb.from('categories').delete().eq('id', id);
     if (error) throw error;
     categories = categories.filter(c => c.id !== id);
+    logEvent('delete_category', id, _catLabel);
     if (currentFilter === id) currentFilter = 'all';
     setStatus('ok','Șters');
     renderFilters(); renderCatList(); render();
@@ -880,12 +1033,14 @@ function escHtml(s) {
 // ---- Event listeners ----
 document.getElementById('modalOverlay').addEventListener('click', function(e){ if (e.target===this) closeModal(); });
 document.getElementById('catModalOverlay').addEventListener('click', function(e){ if (e.target===this) closeCatModal(); });
+document.getElementById('historyOverlay').addEventListener('click', function(e){ if (e.target===this) closeHistory(); });
+document.getElementById('authPass').addEventListener('keydown', function(e){ if (e.key==='Enter') doLogin(); });
 document.getElementById('newCatName').addEventListener('keydown', function(e){ if (e.key==='Enter') addCategory(); });
 document.addEventListener('keydown', function(e){
   if ((e.ctrlKey||e.metaKey) && e.key==='n') { e.preventDefault(); openModal(); }
 });
 
-loadFromCloud();
+initAuth();
 </script>
 </body>
 </html>
